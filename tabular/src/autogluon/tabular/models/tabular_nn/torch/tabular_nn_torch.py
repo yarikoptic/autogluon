@@ -545,7 +545,7 @@ class TabularNeuralNetTorchModel(AbstractNeuralNetworkModel):
 
     def _get_default_resources(self):
         # psutil.cpu_count(logical=False) is faster in training than psutil.cpu_count()
-        num_cpus = psutil.cpu_count(logical=False)
+        num_cpus = 1
         num_gpus = 0
         return num_cpus, num_gpus
 
