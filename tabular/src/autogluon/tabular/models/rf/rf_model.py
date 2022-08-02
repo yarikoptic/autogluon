@@ -8,7 +8,7 @@ import numpy as np
 import psutil
 
 from autogluon.common.features.types import R_BOOL, R_INT, R_FLOAT, R_CATEGORY
-from autogluon.core.constants import MULTICLASS, REGRESSION, SOFTCLASS, QUANTILE
+from autogluon.core.constants import BINARY, MULTICLASS, REGRESSION, SOFTCLASS, QUANTILE
 from autogluon.core.utils.exceptions import NotEnoughMemoryError, TimeLimitExceeded
 from autogluon.core.utils.utils import normalize_pred_probas
 
@@ -140,10 +140,21 @@ class RFModel(AbstractModel):
              **kwargs):
         time_start = time.time()
 
+        # TODO: stratified RF splits??? https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0201904&type=printable
+
         model_cls = self._get_model_type()
 
         max_memory_usage_ratio = self.params_aux['max_memory_usage_ratio']
         params = self._get_model_params()
+
+        hs_tree_kwargs = params.pop('hs_tree_kwargs', 'auto')
+        # FIXME: Temp for benchmarking
+        if hs_tree_kwargs is not None and hs_tree_kwargs == 'auto':
+            if self.problem_type in [BINARY, REGRESSION]:
+                hs_tree_kwargs = {'reg_param': 50}
+            else:
+                hs_tree_kwargs = None
+
         if 'n_jobs' not in params:
             params['n_jobs'] = num_cpus
         n_estimators_final = params['n_estimators']
@@ -168,6 +179,9 @@ class RFModel(AbstractModel):
                     # Causes ~10% training slowdown, so try to avoid if memory is not an issue
                     n_estimator_increments = [n_estimators_test, n_estimators_final]
                     params['warm_start'] = True
+        if hs_tree_kwargs is not None:
+            # TODO: Confirm in HS supports warm_start
+            params['warm_start'] = False
 
         params['n_estimators'] = n_estimator_increments[0]
         if self._daal:
@@ -178,21 +192,48 @@ class RFModel(AbstractModel):
 
         model = model_cls(**params)
 
+        hs_tree_class = None
+        # TODO: Cleanup, move to method
+        if hs_tree_kwargs is not None:
+            try:
+                from imodels.tree.hierarchical_shrinkage import HSTreeClassifier, HSTreeRegressor
+                if model._estimator_type == 'classifier':
+                    hs_tree_class = HSTreeClassifier
+                else:
+                    hs_tree_class = HSTreeRegressor
+                model = hs_tree_class(model, **hs_tree_kwargs)
+                logger.log(15, f'\tUsing imodels HSTree with hyperparameters: {hs_tree_kwargs}')
+            except ImportError:
+                logger.log(30, '\tWarning: Failed to import `imodels` package, falling back to sklearn backend.')
+                hs_tree_class = None
+                hs_tree_kwargs = None
+
         time_train_start = time.time()
         for i, n_estimators in enumerate(n_estimator_increments):
             if i != 0:
                 if params.get('warm_start', False):
-                    model.n_estimators = n_estimators
+                    if hasattr(model, 'n_estimators'):
+                        model.n_estimators = n_estimators
+                    else:
+                        model.estimator_.n_estimators = n_estimators
                 else:
                     params['n_estimators'] = n_estimators
                     model = model_cls(**params)
+                    if hs_tree_class is not None:
+                        model = hs_tree_class(model, **hs_tree_kwargs)
             model = model.fit(X, y, sample_weight=sample_weight)
             if (i == 0) and (len(n_estimator_increments) > 1):
                 time_elapsed = time.time() - time_train_start
                 model_size_bytes = 0
-                for estimator in model.estimators_:  # Uses far less memory than pickling the entire forest at once
+                if hasattr(model, 'estimator_'):
+                    model_estimators = model.estimator_.estimators_
+                    model_n_estimators = model.estimator_.n_estimators
+                else:
+                    model_estimators = model.estimators_
+                    model_n_estimators = model.n_estimators
+                for estimator in model_estimators:  # Uses far less memory than pickling the entire forest at once
                     model_size_bytes += sys.getsizeof(pickle.dumps(estimator))
-                expected_final_model_size_bytes = model_size_bytes * (n_estimators_final / model.n_estimators)
+                expected_final_model_size_bytes = model_size_bytes * (n_estimators_final / model_n_estimators)
                 available_mem = psutil.virtual_memory().available
                 model_memory_ratio = expected_final_model_size_bytes / available_mem
 
@@ -218,6 +259,8 @@ class RFModel(AbstractModel):
                 for j in range(len(n_estimator_increments)):
                     if n_estimator_increments[j] > n_estimators_ideal:
                         n_estimator_increments[j] = n_estimators_ideal
+        if hs_tree_class is not None:
+            model = model.estimator_
         if self._daal and model.criterion != 'entropy':
             # TODO: entropy is not accelerated by sklearnex, need to not set estimators_ to None to avoid crash
             # This reduces memory usage / disk usage.

@@ -48,7 +48,7 @@ extras_require = {
         'scikit-learn-intelex>=2021.5,<2021.6',
     ],
     'imodels': [
-        'imodels>=1.3.0',
+        'imodels>=1.3.3',
     ],
     'vowpalwabbit': [
         'vowpalwabbit>=8.10,<8.11'
@@ -57,14 +57,14 @@ extras_require = {
 
 all_requires = []
 # TODO: Consider adding 'skex' to 'all'
-for extra_package in ['lightgbm', 'catboost', 'xgboost', 'fastai']:
+for extra_package in ['lightgbm', 'catboost', 'xgboost', 'fastai', 'imodels']:
     all_requires += extras_require[extra_package]
 all_requires = list(set(all_requires))
 extras_require['all'] = all_requires
 
 
 test_requires = []
-for test_package in ['imodels', 'vowpalwabbit']:
+for test_package in ['vowpalwabbit']:
     test_requires += extras_require[test_package]
 extras_require['tests'] = test_requires
 install_requires = ag.get_dependency_version_ranges(install_requires)
