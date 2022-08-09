@@ -147,7 +147,8 @@ class RFModel(AbstractModel):
         max_memory_usage_ratio = self.params_aux['max_memory_usage_ratio']
         params = self._get_model_params()
 
-        hs_tree_kwargs = params.pop('hs_tree_kwargs', 'auto')
+        # TODO: Parallelize shrink_tree, can be much faster I think
+        hs_tree_kwargs = params.pop('hs_tree_kwargs', None)
         # FIXME: Temp for benchmarking
         if hs_tree_kwargs is not None and hs_tree_kwargs == 'auto':
             if self.problem_type in [BINARY, REGRESSION]:
@@ -201,7 +202,6 @@ class RFModel(AbstractModel):
                     hs_tree_class = HSTreeClassifier
                 else:
                     hs_tree_class = HSTreeRegressor
-                model = hs_tree_class(model, **hs_tree_kwargs)
                 logger.log(15, f'\tUsing imodels HSTree with hyperparameters: {hs_tree_kwargs}')
             except ImportError:
                 logger.log(30, '\tWarning: Failed to import `imodels` package, falling back to sklearn backend.')
@@ -212,25 +212,16 @@ class RFModel(AbstractModel):
         for i, n_estimators in enumerate(n_estimator_increments):
             if i != 0:
                 if params.get('warm_start', False):
-                    if hasattr(model, 'n_estimators'):
-                        model.n_estimators = n_estimators
-                    else:
-                        model.estimator_.n_estimators = n_estimators
+                    model.n_estimators = n_estimators
                 else:
                     params['n_estimators'] = n_estimators
                     model = model_cls(**params)
-                    if hs_tree_class is not None:
-                        model = hs_tree_class(model, **hs_tree_kwargs)
             model = model.fit(X, y, sample_weight=sample_weight)
             if (i == 0) and (len(n_estimator_increments) > 1):
                 time_elapsed = time.time() - time_train_start
                 model_size_bytes = 0
-                if hasattr(model, 'estimator_'):
-                    model_estimators = model.estimator_.estimators_
-                    model_n_estimators = model.estimator_.n_estimators
-                else:
-                    model_estimators = model.estimators_
-                    model_n_estimators = model.n_estimators
+                model_estimators = model.estimators_
+                model_n_estimators = model.n_estimators
                 for estimator in model_estimators:  # Uses far less memory than pickling the entire forest at once
                     model_size_bytes += sys.getsizeof(pickle.dumps(estimator))
                 expected_final_model_size_bytes = model_size_bytes * (n_estimators_final / model_n_estimators)
@@ -259,8 +250,12 @@ class RFModel(AbstractModel):
                 for j in range(len(n_estimator_increments)):
                     if n_estimator_increments[j] > n_estimators_ideal:
                         n_estimator_increments[j] = n_estimators_ideal
+
         if hs_tree_class is not None:
+            # fits on init if model was already fitted
+            model = hs_tree_class(model, **hs_tree_kwargs)
             model = model.estimator_
+
         if self._daal and model.criterion != 'entropy':
             # TODO: entropy is not accelerated by sklearnex, need to not set estimators_ to None to avoid crash
             # This reduces memory usage / disk usage.
@@ -302,7 +297,7 @@ class RFModel(AbstractModel):
         return callable(getattr(self.model, "_set_oob_score", None)) or self._is_sklearn_1()
 
     # FIXME: Unknown if this works with quantile regression
-    def _get_oof_pred_proba(self, X, y, **kwargs):
+    def _get_oof_pred_proba(self, X, y, preprocess=True, **kwargs):
         if not self.model.bootstrap:
             raise ValueError('Forest models must set `bootstrap=True` to compute out-of-fold predictions via out-of-bag predictions.')
 
@@ -314,7 +309,8 @@ class RFModel(AbstractModel):
         # TODO: This can also be done via setting `oob_score=True` in model params,
         #  but getting the correct `pred_time_val` that way is not easy, since we can't time the internal call.
         if oob_is_not_set and self._model_supports_oob_pred_proba():
-            X = self.preprocess(X)
+            if preprocess:
+                X = self.preprocess(X)
 
             if getattr(self.model, "n_classes_", None) is not None:
                 if self.model.n_outputs_ == 1:
