@@ -262,3 +262,39 @@ class FeatureDistanceAnalysisVisualization(AbstractVisualization, StateCheckMixi
             for group in state.feature_distance.near_duplicates:
                 message += f'\n - `{"`, `".join(sorted(group["nodes"]))}` - distance `{group["distance"]:.2f}`'
             self.render_markdown(message)
+
+
+class NonparametricSignificanceVisualization(AbstractVisualization, JupyterMixin):
+
+    def __init__(self,
+                 headers: bool = False,
+                 namespace: str = None,
+                 fig_args: Union[None, Dict[str, Any]] = {},
+                 pvalue_cmap: str = 'rocket',
+                 **kwargs) -> None:
+        super().__init__(namespace, **kwargs)
+        self.headers = headers
+        self.fig_args = fig_args
+        self.cmap = pvalue_cmap
+
+    def can_handle(self, state: AnalysisState) -> bool:
+        return 'association_pvalue_matrix' in state
+
+    def _render(self, state: AnalysisState) -> None:
+        if self.headers:
+            self.render_header_if_needed(state, 'P-values for non-parametric association tests')
+
+        fig, ax = plt.subplots(**self.fig_args)
+        args = {'vmin': 0, 'vmax': 1, 'cmap': self.cmap}
+        corr = state.association_pvalue_matrix
+
+        sns.heatmap(corr,
+                    annot=True,
+                    ax=ax,
+                    linewidths=.9,
+                    linecolor='white',
+                    fmt='.2f',
+                    square=True,
+                    # cbar_kws={"shrink": 0.5},
+                    **args)
+        # self.display_obj(fig)
